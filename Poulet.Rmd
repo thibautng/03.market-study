@@ -1,0 +1,1375 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.
+
+## Sommaire
+
+Importation des librairies
+
+1.Chargement des bases de données
+
+2.  Nettoyage des données
+
+3.  Jointure des 8 dataframes
+
+4.  Nettoyage du dataframe principal
+
+5.  Clustering par segmentation hiérarchique ascendante
+
+6.  ACP (Analyse en composantes principales)
+
+7.  Analyse des pays du cluster 5
+
+8.  Analyse des pays des nouveaux groupes 2, 3, 4 et 5
+
+9.  Tests statistiques
+
+-a. Tests d'adéquation à la loi normale
+
+-b. Tests statistiques des clusters dans la variable 'disponibilité alimentaire(Kcal)
+
+## Importation des librairies
+
+```{r}
+library(plyr)
+library(dplyr)
+library(reshape2)
+library(tidyr)
+library(openxlsx)
+library(FactoMineR)
+library(factoextra)
+library(cluster)
+library(corrplot)
+library(fpc)
+library(scales)
+library(tidyverse)
+library(EnvStats)
+library(nortest)
+library(cowplot)
+library(maps)
+library(mapdata)
+```
+
+## 1. Chargement des bases de données
+
+#### Population
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "")
+setwd("C:/Users/Thibaut/Google Drive/Data Analyse/OpenClassRoom - Projets/Projet 5/data")
+```
+
+```{r}
+pop <- read.table("data/Population_F_Toutes_les_Données_(Normalisé).csv", sep=',', header=TRUE)
+head(pop)
+```
+
+#### Bilans alimentaires
+
+```{r}
+df <- read.table("data/BilansAlimentaires_F_Toutes_les_Données_(Normalisé).csv", sep=',', header=TRUE)
+head(df)
+```
+
+#### Élevage de poulet
+
+```{r}
+# Source: http://www.fao.org/faostat/fr/  --> Élevage
+
+prod_poulet <- read.table('data/FAOSTAT_poulet_2-4-2021.csv', sep=',', header=TRUE, encoding = "UTF-8")
+head(prod_poulet)
+```
+
+#### PIB par habitant en 2018 (selon la valeur du dollar en 2015)
+
+```{r}
+# source: FAO - http://www.fao.org/faostat/fr/#data/MK
+
+pib <- read.table('data/FAOSTAT_data_2-4-2021.csv', sep=',', header=TRUE, encoding = "UTF-8")
+head(pib)
+```
+
+#### Consommation de volaille
+
+```{r}
+# Source: Our World in Data - https://ourworldindata.org/meat-production#environmental-impacts-of-meat-production/
+
+conso_volaille <- read.csv('data/per-capita-meat-consumption-by-type-kilograms-per-year.csv', sep=',', header=TRUE, encoding = "UTF-8")
+head(conso_volaille)
+```
+
+#### Distance entre pays
+
+```{r}
+# Source: https://github.com/rahulbot/distances-between-countries
+
+distance <- read.table('data/distances.csv', sep=',', header=TRUE)
+head(distance)
+```
+
+#### Codes Pays
+
+```{r}
+code_pays <- read.csv('data/FAOSTAT_code_2-16-2021.csv', sep=',', encoding = "UTF-8")
+head(code_pays)
+```
+
+#### Stabilité politique
+
+```{r}
+stab_pol <- read.table('data/FAOSTAT_data_2-12-2021.csv', sep=',', header=TRUE, encoding = "UTF-8")
+head(stab_pol)
+```
+
+## 2. Nettoyage de données
+
+#### Nettoyage du dataframe de la FAO consacré aux données démographiques
+
+```{r}
+tx_crois <- pop %>% 
+  mutate(Valeur = Valeur * 1000) %>% # Conversion de la population en simples unités
+  filter((Élément == 'Population totale') & (Année == '2013' | Année == '2018') & (Symbole == "X")) %>%  #Restriction du dataframe
+  select(Zone, Code.année, Valeur) %>% # Projection du dataframe à  3 colonnes
+  pivot_wider(names_from = Code.année, values_from = Valeur) %>%
+  dplyr::rename(pop_2013 = '2013', pop_2018 = '2018') # Modification des noms
+
+head(tx_crois)
+```
+
+```{r}
+# Ajout des colonnes indiquant le taux de croissance démographique effectif entre 2013 et 2018:
+tx_crois <- tx_crois %>% 
+    mutate(tx_crois_2013_18 = (pop_2018 - pop_2013) / pop_2013 * 100) %>%
+    select(Zone, tx_crois_2013_18)
+
+head(tx_crois)
+```
+
+```{r}
+# Uniformisation des noms des pays
+tx_crois$Zone <- as.character(tx_crois$Zone)
+tx_crois[tx_crois == "Tchéquie (la)"] <- "Tchéquie"
+tx_crois[tx_crois == "Royaume-Uni"] <- "Royaume-Uni de Grande-Bretagne et d'Irlande du Nord"
+```
+
+#### Nettoyage du dataframe de la FAO consacré à la disponibilité alimentaire
+
+Selon la nomenclature mise en évidence par les Symboles, les données et leurs sources se répartissent de la manière suivante:
+
+\- 865 sont des chiffres non officiels (\*);
+
+\- 373 371 sont des agrégats pouvant inclure des données officielles, semi-officielles, estimées ou calculées (A);
+
+\- 453 697 sont des données calculées (Fc);
+
+\- 540 931 sont des données de la FAO basées sur une méthodologie d'imputation (Im);
+
+\- 72 582 sont des données standardisées (S).
+
+Absence de données pour les éléments suivants:
+
+\- Produit: Disponibilités protéines moyennes d'origine animale (g/personne/jour) (moyenne sur 3 ans) - Code Produit: 21014
+
+\- Produit: Volaille - Code Produit 2029
+
+\- Produit: Viande de volaille - Code Produit 1808
+
+\- Produit: Viande, volaille - Code Produit 1058
+
+\- Élément: Protéines/Année (tonnes) - Code Élément: 271
+
+\- Élément: Disponibilité alimentaire en quantité (g/pers/jour) - Code Élément: 646
+
+\- Élément: Disponibilité alimentaire en quantité (g/pers/jour) - Code Élément: 665
+
+\- Élément: Disponibilité alimentaire en quantité (tonnes) - Code Élément: 5141
+
+Création de 2 dataframes: un consacré à l'alimentation générale et l'autre consacré à la consommation de volailles:
+
+```{r}
+# Suppression de l'entrée dédiée à la "Chine", qui fait doublon
+df <- df %>% filter(!Zone == "Chine")
+```
+
+```{r}
+# Filtrage du dataframe en retenant les éléments suivants:
+# Code Élément 664: 'Disponibilité alimentaire (Kcal/personne/jour)'
+# Code Élément 674: 'Disponibilité de protéines en quantité (g/personne/jour)'
+# Code Élément 645: 'Disponibilité de protéines en quantité (kg/pers/an) '
+# Code Produit 2901: 'Total General'
+# Code.zone < 5000: Pays uniquement, suppression des régions
+
+df_alim_gen <- df %>%
+    filter((Code.année == '2018') & 
+           (Code.Élément == '664' | Code.Élément == '674' | Code.Élément == '645') &
+           (Code.Produit == '2901') & 
+           (Code.zone < 5000)
+          ) %>%
+    select(Zone, Élément, Valeur) %>%
+    pivot_wider(names_from = Élément, values_from = Valeur) %>%
+    dplyr::rename(
+        'Dispo_alim_Kcal_pers_jour' = 'Disponibilité alimentaire (Kcal/personne/jour)',
+        'Dispo_prot_g_pers_jour' = 'Disponibilité de protéines en quantité (g/personne/jour)'
+        )
+
+head(df_alim_gen)
+```
+
+```{r}
+# Filtrage du dataframe en retenant les éléments suivants:
+# Code Élément 664: 'Disponibilité alimentaire (Kcal/personne/jour)'
+# Code Élément 674: 'Disponibilité de protéines en quantité (g/personne/jour)'
+# Code Élément 645: 'Disponibilité de protéines en quantité (kg/pers/an) '
+# Code Produit 2734: 'Viande de volailles (g/personne/jour)'
+# Code.zone < 5000: Pays uniquement
+
+df_volail <- df %>%
+    filter((Code.année == '2018') & 
+           (Code.Élément == '664' | Code.Élément == '674' | Code.Élément == '645') &
+           (Code.Produit == '2734') & 
+           (Code.zone < 5000)
+          ) %>%
+    select(Zone, Élément, Valeur) %>%
+    pivot_wider(names_from = Élément, values_from = Valeur) %>%
+    dplyr::rename(
+        'Dispo_alim_volail_kg_pers_an' = 'Disponibilité alimentaire en quantité (kg/personne/an)',
+        'Dispo_volail_Kcal_pers_jour' = 'Disponibilité alimentaire (Kcal/personne/jour)',
+        'Dispo_prot_volail_g_pers_jour' = 'Disponibilité de protéines en quantité (g/personne/jour)'
+        )
+
+head(df_volail)
+```
+
+```{r}
+# Filtrage du dataframe en retenant les éléments suivants: 
+# Code.Produit 2903: 'Produits Vegetaux'
+# Code.Produit 2941: 'Produits Animaux'
+# Code.Élément 674: 'Disponibilité de protéines en quantité (g/personne/jour)'
+
+df_prot_anim <- df %>%
+    filter((Code.année == '2018') & 
+           ((Code.Produit == '2903') | (Code.Produit == '2941')) &
+           (Code.Élément == '674') & 
+           (Code.zone < 5000)
+          ) %>%
+    select(Zone, Produit, Valeur) %>%
+    pivot_wider(names_from = Produit, values_from = Valeur) %>%
+    dplyr::rename(prot_anim = "Produits Animaux", prot_veg = "Produits Vegetaux") %>%
+    mutate(part_prot_anim = prot_anim / (prot_anim + prot_veg) * 100) %>%
+    select(Zone, part_prot_anim)
+
+head(df_prot_anim)
+```
+
+#### Nettoyage du dataframe du PIB
+
+```{r}
+pib <- pib %>%
+    select(Zone, Valeur) %>%
+    dplyr::rename(PIB_hab_dollar = Valeur) %>%
+    filter(!Zone == "Chine")
+head(pib)
+```
+
+#### Nettoyage du dataframe 'code_pays'
+
+```{r}
+code_pays <- code_pays %>% 
+    select(Zone,Code.zone)
+```
+
+```{r}
+# Suppression de la ligne dédée à la "Chine", qui fait doublon avec "Chine continentale"
+code_pays <- code_pays %>% filter(!Zone == "Chine")
+```
+
+```{r}
+# Attribution du code iso3 "CHN" à la "Chine, continentale"
+code_pays[code_pays==41] <- "CHN"
+```
+
+```{r}
+code_pays %>% filter(grepl("Chine", Zone))
+```
+
+#### Nettoyage du dataframe des distances entre pays
+
+```{r}
+distance <- distance %>% 
+    dplyr::rename("Code.zone"=X, "Distance_France_km"=FRA) %>%
+    select("Code.zone","Distance_France_km")
+head(distance)
+```
+
+Jusqu'à présent, les variables retenues valoriseront les plus hautes. La variable de la distance à la France quant à elle a pour spécificité que nous valoriserons plutôt des valeurs basses car la distance avec les usines Françaises verra l'intérêt d'une implantation décroître à mesure qu'elle grandira. Pour palier à ce décalage, nous avons donc choisi de donner une valeur négative à ces distances en les multipliant toutes par -1.
+
+```{r}
+distance[,2] <- distance[,2] * -1
+```
+
+#### Nettoyage du dataframe de la stabilité politique
+
+```{r}
+stab_pol <- stab_pol %>%
+    dplyr::rename("indice_stab_pol" = "Valeur") %>%
+    select(Zone,indice_stab_pol)
+head(stab_pol)
+```
+
+#### Nettoyage du dataframe de la production de poulet
+
+```{r}
+prod_poulet <- prod_poulet %>%
+    mutate(prod_poulet_tete = Valeur * 1000) %>%
+    select(Zone, prod_poulet_tete)
+head(prod_poulet)
+```
+
+Après jointure avec le dataframe principal, il s'avérera que cet indicateur ne relève pas les données pour les pays suivants:
+
+Autriche, Allemagne, Djibouti, Espagne, Irlande, Italie, Maldives, Malte, Pays-Bas, Portugal.
+
+Ces pays sont relativement importants et ne peuvent être exclus de notre analyse. Nous allons donc devoir nous affranchir de cet indicateur.
+
+#### Nettoyage du dataframe dédié à la consommation de volaille
+
+```{r}
+conso_volaille <- conso_volaille %>%
+    filter(Year == "2017") %>%
+    dplyr::rename("Code.zone"="Code", "conso_volail_kg_pers"="Poultry.meat.food.supply.quantity..kg.capita.yr...FAO..2020.") %>%
+    select(Code.zone, conso_volail_kg_pers)
+```
+
+```{r}
+head(conso_volaille)
+```
+
+## 3. Jointure des 8 dataframes
+
+```{r}
+data <- left_join(df_alim_gen, df_prot_anim)
+data <- left_join(data, tx_crois)
+data <- left_join(data, pib)
+data <- left_join(data, code_pays)
+data <- left_join(data, stab_pol)
+data <- left_join(data, conso_volaille)
+data <- merge(data, distance, all=TRUE)
+head(data)
+```
+
+## 4. Nettoyage du dataframe principal
+
+```{r}
+# Suppression des territoires n'étant pas des pays
+data <- data %>% filter(!is.na(Zone)) %>%
+    filter(!is.na(Code.zone)) %>%
+    filter(!(Code.zone == "NCL") & !(Code.zone =="PYF"))
+```
+
+```{r}
+# Indexation du dataframe avec les noms des pays
+rownames(data) <- data$Zone
+data <- data %>% select(!Zone)
+```
+
+```{r}
+dim(data)
+```
+
+```{r}
+# Imputation des valeurs manquantes
+data$Distance_France_km[data$Code.zone == "KOR"] <- 8960
+data$Distance_France_km[data$Code.zone == "LAO"] <- 9231
+data$Distance_France_km[data$Code.zone == "PRK"] <- 8765
+data$PIB_hab_dollar[data$Code.zone == "TWN"] <- 52304
+```
+
+```{r}
+# Mise en évidence des entrées ayant des informations manquantes
+data[!complete.cases(data),]
+```
+
+```{r}
+head(data)
+```
+
+```{r}
+dim(data)
+```
+
+## 5. Clustering par segmentation hiérarchique ascendante
+
+#### Détermination du nombre adéquat de groupes
+
+```{r}
+# Mise à l'échelle des données (centrage et réduction)
+# (Source: https://predictivehacks.com/how-to-determine-the-number-of-clusters-of-k-means-in-r/)
+scaled_data <- as.data.frame(scale(data %>%
+                                 select(-Code.zone), center=T,scale=T))
+```
+
+\- Méthode du Coude: évaluer la proportion d'inertie expliquée:
+
+```{r}
+# Utilisation de map_dbl pour modéliser la variation du nombre k de catégories 
+tot_withinss <- map_dbl(2:11, function(k){
+    model <- kmeans(x = scaled_data, centers = k)
+    model$tot.withinss
+})
+ 
+# Création d'un dataframe contenant k et tot_withinss (total de la somme au carré des valeurs à l'intérieur des clusters)
+elbow_df <- data.frame(
+    k = 2:11,
+    tot_withinss = tot_withinss
+)
+
+ 
+# Graphique selon la méthode du "coude"
+ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+    geom_line() + geom_point()+
+    scale_x_continuous(breaks = 2:11)
+```
+
+Le graphique indique qu'au delà de trois clusters, le total au carré des valeurs cesse de diminuer et qu'à l'inverse l'intertie, elle, diminue. Cela suggère que 4 catégories suffisent à caractériser les individus de notre dataframe.
+
+\- Méthode de la Silhouette
+
+```{r}
+# Utilisation de map_dbl pour modéliser la variation du nombre k de catégories 
+sil_width <- map_dbl(2:11,  function(k){
+  model <- pam(x = scaled_data, k = k)
+  model$silinfo$avg.width
+})
+ 
+# Création d'un dataframe contenant k et sil_width (largeur de la silhouette)
+sil_df <- data.frame(
+  k = 2:11,
+  sil_width = sil_width
+)
+ 
+# Graphique de la Silhouette
+ggplot(sil_df, aes(x = k, y = sil_width)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:11)
+```
+
+Selon la méthode de la Silhouette, le nombre de clusters idéal serait de 4.
+
+```{r}
+# Graphique de Silhouette
+attach(data)
+d = dist(data[,-1],method="euclidean")
+
+ag=agnes(d, method = "average")
+ag3 = cutree(ag,3)
+si=silhouette(ag3,d)
+plot(si,col=c("red", "green", "blue"))
+```
+
+Le graphique renvoie une largeur de silhouette de 0.73. La partition représente 3 groupes déséquilibrés avec 139 individus dans le 1er groupe, 26 dans le 2e groupe et 5 dans le 3e groupe.
+
+#### Classification hiérarchique
+
+```{r}
+# Matrice des distances entre individus
+d.data <- dist(scaled_data)
+
+# CAH - critère de Ward
+cah.ward <- hclust(d.data,method="ward.D2")
+```
+
+```{r}
+# Affichage dendogramme
+dendogramme <- plot(cah.ward, main= 'Dendogramme de l\'ensemble des pays', xlab='Pays', ylab='Hauteur')
+dendogramme
+```
+
+```{r}
+# Sauvegarde du dendogramme
+jpeg(file="dendogramme.jpeg",
+    width=640, height=640)
+dendogramme <- plot(cah.ward, main= 'Dendogramme de l\'ensemble des pays', xlab='Pays', ylab='Hauteur')
+dev.off()
+```
+
+```{r}
+dim(data)
+```
+
+```{r}
+# Application de la classification hiérarchique
+res.HCPC <- HCPC(scaled_data,nb.clust=5,graph=TRUE)
+res.HCPC
+```
+
+```{r}
+dendogramme_cluster <- fviz_dend(res.HCPC, 
+          cex = 0.7,                    # Taille du texte
+          palette = "jco",              # Palette de couleur ?ggpubr::ggpar
+          rect = TRUE, rect_fill = TRUE, # Rectangle autour des groupes
+          rect_border = "jco",           # Couleur du rectangle
+          labels_track_height = 0.8,      # Augment l'espace pour le texte
+          main='Dendogramme des pays regroupés selon leur cluster',   # Titre
+                                  xlab='Pays', ylab='Hauteur'
+          )
+dendogramme_cluster
+```
+
+```{r}
+# Sauvegarde du dendogramme
+jpeg(file="dendogramme_cluster.jpeg",
+    width=640, height=640)
+dendogramme_cluster
+dev.off()
+```
+
+```{r}
+# Sauvegarde du dendogramme
+jpeg(file="dendogramme_cluster.jpeg",
+    width=640, height=640)
+dendogramme_cluster
+dev.off()
+```
+
+```{r}
+# Attribution des individus aux clusters
+data_clust <- res.HCPC$data.clust
+```
+
+```{r}
+# Liste des pays selon leur groupe
+liste_pays_clust <- data_clust %>% 
+    arrange(clust) %>%
+    select(clust)
+head(liste_pays_clust)
+```
+
+```{r}
+liste_pays_clust %>% filter(clust==5)
+```
+
+```{r}
+# Création d'un fichier CSV listant les pays selon leur cluster d'appartenance
+write.table(liste_pays_clust, "liste_pays_clusters.csv", row.names=TRUE, sep=",", dec=".", na=" ")
+```
+
+#### Aggrégation des valeurs par clusters
+
+```{r}
+# Aggrégation et détermination des valeurs moyennes pour chaque cluster 
+data_clust_agg <- data_clust %>%
+    aggregate(list(data_clust$clust), mean, na.rm=TRUE)
+data_clust_agg
+```
+
+```{r}
+# Suppression de la colonne "clust"
+data_clust_agg$clust <- NULL
+
+# Indexation de la colonne "Group.1"
+rownames(data_clust_agg) <- data_clust_agg$Group.1
+data_clust_agg
+```
+
+```{r}
+# Création d'un fichier CSV regroupant les valeurs moyennes normalisées de chacun des clusters
+write.table(data_clust_agg, "centroïdes_groupes.csv", row.names=FALSE, sep=",", dec=".", na=" ")
+```
+
+```{r}
+scaled_data_clust <- scale(data_clust_agg[,2:9], center=T, scale=T)
+scaled_data_clust
+```
+
+```{r}
+# Tentative de création d'un index
+rownames(scaled_data_clust) <- 1:nrow(scaled_data_clust)
+scaled_data_clust
+```
+
+```{r}
+# Heatmap de corrélation
+corrplot(scaled_data_clust,is.corr=FALSE)
+```
+
+#### Visualisation graphique des clusters
+
+```{r}
+fviz_cluster(res.HCPC,
+             repel = TRUE,            # Evite le chevauchement des textes
+             show.clust.cent = TRUE, # Montre le centre des clusters
+             palette = "jco",         # Palette de couleurs, voir ?ggpubr::ggpar
+             ggtheme = theme_minimal(),
+             main = "Carte factorielle des pays regroupés en 5 clusters"
+             )
+```
+
+Le graphique confirme la carte de chaleur, à savoir que la 1e dimension contribue à 53,9% de l'inertie des données.
+
+On constate que le cluster n°5 se détache des autres. Celui-ci semble donc mieux répondre aux attentes de notre étude de marché.
+
+## 6. ACP (Analyse en composantes principales)
+
+```{r}
+# Standardisation des données et ACP
+res.pca <- PCA(scaled_data, scale.unit=TRUE, graph=FALSE)
+res.pca
+```
+
+```{r}
+# Graphique des variables
+var <- get_pca_var(res.pca)
+var
+```
+
+```{r}
+# Visualisation du cos2 des variables, qui informe sur la qualité de 
+# la réprésentation des variables
+corrplot(var$cos2, is.corr=FALSE, main="Qualité de représentation des variables selon les dimensions", mar=c(3,0,3,0))
+```
+
+```{r}
+fviz_pca_var(res.pca, col.var="cos2",
+            gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+            repel=TRUE
+            )
+```
+
+La disponibilité alimentaire, la disponibilité en protéine et le PIB par habitant semblent former un groupe relativement homogène. De même, la part des protéines animales consommées, l'indice de stabilité politique et la consommation de volaille présentent une certaine proximité. Le taux de croissance démographique apparaît corrélé négativement à ces tendances. Enfin, la distance avec la France se détache nettement de ces tendances.
+
+```{r}
+fviz_pca_ind(res.pca, label="none", habillage=data_clust$clust,
+             addEllipses=TRUE, ellipse.level=0.90)
+```
+
+Le graphique confirme que le cluster 5 regroupe les marchés les plus propices à l'exportation de volailles.
+
+## 7. Analyse des pays du cluster 5
+
+```{r}
+# Restriction et préparation du tableau pour la jointure
+data_clust_5 <- data_clust %>% filter(clust==5) %>%
+    select(clust)
+head(data_clust_5)
+```
+
+```{r}
+dim(data_clust_5)
+```
+
+```{r}
+# Jointure avec le dataframe principal
+data_clust_5 <- merge(data_clust_5, data, by.x = 0, by.y = 0, all.x = TRUE, all.y = TRUE)
+```
+
+```{r}
+# Restriction aux pays des clusters 5
+data_clust_5 <- data_clust_5[complete.cases(data_clust_5),]
+head(data_clust_5)
+```
+
+```{r}
+# Suppresion de la colonne "clust"
+data_clust_5$clust <- NULL
+```
+
+#### Projection du dataframe avec élimination des variables jugées redondantes dans notre ACP
+
+```{r}
+new_df <- data_clust_5 %>% 
+    select(Row.names, tx_crois_2013_18, conso_volail_kg_pers, PIB_hab_dollar, Distance_France_km)
+```
+
+```{r}
+rownames(new_df) <- new_df$Row.names
+
+new_df$Row.names <- NULL
+
+head(new_df)
+```
+
+```{r}
+# Mise à l'échelle des données (centrage et réduction)
+new_scaled_data <- as.data.frame(scale(new_df, center=T,scale=T))
+head(new_scaled_data)
+```
+
+#### Classification ascendante hiérarchique du nouveau dataframe
+
+```{r}
+# Matrice des distances entre individus
+d.data <- dist(new_scaled_data)
+
+# CAH - critère de Ward
+cah.ward <- hclust(d.data,method="ward.D2")
+
+# Affichage dendogramme
+plot(cah.ward, main= 'Dendogramme des pays sélectionnés')
+```
+
+```{r}
+# Application de la classification hiérarchique
+res.HCPC_2 <- HCPC(new_scaled_data,nb.clust=5,graph=TRUE)
+res.HCPC
+```
+
+```{r}
+fviz_dend(res.HCPC_2, 
+          cex = 0.7,                    # Taille du texte
+          palette = "jco",              # Palette de couleur ?ggpubr::ggpar
+          rect = TRUE, rect_fill = TRUE, # Rectangle autour des groupes
+          rect_border = "jco",           # Couleur du rectangle
+          labels_track_height = 0.8      # Augment l'espace pour le texte
+          )
+```
+
+#### Visualisation graphique des clusters
+
+```{r}
+fviz_cluster(res.HCPC_2,
+             repel = TRUE,            # Evite le chevauchement des textes
+             show.clust.cent = TRUE, # Montre le centre des clusters
+             palette = "jco",         # Palette de couleurs, voir ?ggpubr::ggpar
+             ggtheme = theme_minimal(),
+             main = "Factor map"
+             )
+```
+
+Les pays des clusters 2, 3 et 5 sont graphiquement isolés mais ils apparaissent regrouper les critères les plus favorables à l'implantation d'une activité de distribution de poulets.
+
+```{r}
+# Attribution des individus aux clusters
+new_data_clust <- res.HCPC_2$data.clust
+new_data_clust %>% 
+    arrange(clust)
+```
+
+```{r}
+# Aggrégation et détermination des valeurs moyennes pour chaque cluster 
+new_data_clust_agg <- new_data_clust %>%
+    aggregate(list(new_data_clust$clust), mean, na.rm=TRUE)
+head(new_data_clust_agg)
+```
+
+Au regard des résultats aggrégés, centrés et réduits, il semble qu'un plus grand nombre de critères jouent en faveur des groupes 2, 4 et 5.
+
+En dépit d'une consommation de volaille limitée, les pays des groupes 2, 4 et 5 bénéficient d'une forte croissance économique et démographique et, en dehors du cluster 5, d'une relative proximité géographique avec la France.
+
+```{r}
+# Nettoyage
+new_data_clust_agg$clust <- NULL
+rownames(new_data_clust_agg) <- new_data_clust_agg$Group.1
+head(new_data_clust_agg)
+```
+
+```{r}
+new_scaled_data_clust <- scale(new_data_clust_agg[,2:5], center=T, scale=T)
+new_scaled_data_clust
+```
+
+```{r}
+# Heatmap de corrélation
+corrplot(new_scaled_data_clust,is.corr=FALSE)
+```
+
+Le tableau des chaleurs semble confirmer l'exclusion du groupe 1. Les pays des groupes 2, 3 et 5 semblent nettement se détacher des autres pays. Le groupe 4 présente quelques conditions favorables avec notamment une consommation de volaille élevée. Nous allons donc garder dans notre analyse les pays des groupes 2, 3, 4 et 5.
+
+## 8. Analyse des pays des nouveaux groupes 2, 3, 4 et 5
+
+```{r}
+# Restriction et préparation du tableau pour la jointure
+data_clust_2e_restrict <- new_data_clust %>% filter(clust==2 | clust==3 | clust==4 | clust==5) %>%
+    select(clust)
+data_clust_2e_restrict
+```
+
+```{r}
+# Jointure avec le dataframe principal
+data_2e_restrict <- merge(data_clust_2e_restrict, data, by.x = 0, by.y = 0, all.x = TRUE, all.y = TRUE)
+head(data_2e_restrict)
+```
+
+```{r}
+second_df <- data_2e_restrict[complete.cases(data_2e_restrict),]
+```
+
+```{r}
+rownames(second_df) <- second_df$Row.names
+
+second_df$Row.names <- NULL
+second_df$clust <- NULL
+
+head(second_df)
+```
+
+Le tableau ci-dessus regroupe les données brutes des 10 pays sélectionnés pour l'implantation d'une activité d'exportation de poulets.
+
+```{r}
+# Mise à l'échelle des données (centrage et réduction)
+scaled_second_df <- as.data.frame(scale(second_df[,2:9], center=T,scale=T))
+head(scaled_second_df)
+```
+
+### Classification ascendante hiérarchique issue de la 2nde restriction du dataframe
+
+#### Création d'un dendogramme
+
+```{r}
+# Matrice des distances entre individus
+d.data <- dist(scaled_second_df)
+
+# CAH - critère de Ward
+cah.ward <- hclust(d.data,method="ward.D2")
+
+# Affichage dendogramme
+plot(cah.ward)
+```
+
+#### Détermination du nombre idéal de clusters: méthode du Coude
+
+```{r}
+# Utilisation de map_dbl pour modéliser la variation du nombre k de catégories 
+tot_withinss <- map_dbl(2:8, function(k){
+    model <- kmeans(x = scaled_second_df, centers = k)
+    model$tot.withinss
+})
+ 
+# Création d'un dataframe contenant k et tot_withinss (total de la somme au carré des valeurs à l'intérieur des clusters)
+elbow_df <- data.frame(
+    k = 2:8,
+    tot_withinss = tot_withinss
+)
+
+ 
+# Graphique selon la méthode du "coude"
+ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+    geom_line() + geom_point()+
+    scale_x_continuous(breaks = 2:8)
+```
+
+De ce graphique, nous pouvons déduire un léger redressement de la courbe au niveau du point 4 de la courbe.
+
+```{r}
+# Application de la classification hiérarchique
+res.HCPC_3 <- HCPC(scaled_second_df,nb.clust=3,graph=TRUE)
+res.HCPC_3
+```
+
+```{r}
+fviz_dend(res.HCPC_3, 
+          cex = 0.7,                    # Taille du texte
+          palette = "jco",              # Palette de couleur ?ggpubr::ggpar
+          rect = TRUE, rect_fill = TRUE, # Rectangle autour des groupes
+          rect_border = "jco",           # Couleur du rectangle
+          labels_track_height = 0.8      # Augment l'espace pour le texte
+          )
+```
+
+### Visualisation graphique des clusters
+
+```{r}
+fviz_cluster(res.HCPC_3,
+             repel = TRUE,            # Evite le chevauchement des textes
+             show.clust.cent = TRUE, # Montre le centre des clusters
+             palette = "jco",         # Palette de couleurs, voir ?ggpubr::ggpar
+             ggtheme = theme_minimal(),
+             main = "Factor map"
+             )
+```
+
+```{r}
+# Attribution des individus aux clusters
+second_data_clust <- res.HCPC_3$data.clust
+second_data_clust %>% 
+    arrange(clust)
+```
+
+```{r}
+# Aggrégation et détermination des valeurs moyennes pour chaque cluster 
+second_data_clust_agg <- second_data_clust %>%
+    aggregate(list(second_data_clust$clust), mean, na.rm=TRUE)
+head(second_data_clust_agg)
+```
+
+```{r}
+# Nettoyage
+second_data_clust_agg$clust <- NULL
+rownames(second_data_clust_agg) <- second_data_clust_agg$Group.1
+head(second_data_clust_agg)
+```
+
+```{r}
+second_scaled_data_clust <- scale(second_data_clust_agg[,2:9], center=T, scale=T)
+```
+
+### ACP (Analyse en composantes principales)
+
+```{r}
+# Standardisation des données et ACP
+res.pca <- PCA(scaled_second_df, scale.unit=TRUE, graph=FALSE)
+res.pca
+```
+
+```{r}
+# Graphique des variables
+var <- get_pca_var(res.pca)
+var
+```
+
+```{r}
+fviz_pca_var(res.pca, col.var="cos2",
+            gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+            repel=TRUE
+            )
+```
+
+```{r}
+# Heatmap de corrélation
+corrplot(second_scaled_data_clust,is.corr=FALSE)
+```
+
+Au regard du tableau de chaleur et du graphique d'aggrégation par couleur, il apparaît que les pays du groupes 3 (Macao, Luxembourg, Suisse et Norvège) se distinguent des autres groupes sur l'ensemble des variables retenues dans notre analyse. Ce sont ces 4 pays que nous avons privilégié pour la conclusion de notre étude sur les possibles débouchés d'une activité d'exportation de poulets.
+
+## 9. Tests statistiques
+
+### a. Test d'adéquation à la loi normale
+
+Nous disposons de 8 variables continues. Parmi celles-ci, les trois variables relatives à la disponibilité alimentaire et à la consommation de volailles montrent une certaine proximité pusiqu'elles sont partiellement corrélées, et s'appliquent aux individus sur un rythme quotidien. La part des protéines animales dans l'alimentation est une proportion comprise entre 0 et 100. Le taux de croissance démographique est un pourcentage compris entre -100 et 100. Enfin, l'indice de stabilité politique se fonde sur des valeurs continues de faible amplitude comprises environ entre -5 et 5.
+
+Nous considérons que nos variables suivent des lois de probabilité continue. Nous allons donc étudier l'écart entre la fonction de répartition d'un loi normale (Fn) et la fonction de répartition observée (F0) pour chacune des variables retenues dans notre analyse. Nous allons donc tester chacune des variables comme des variables indépendantes et identiquement distribuées de même loi que X, selon les deux hypothèses suivantes: H0: F=F0 H1:F≠F0
+
+Nous allons utiliser plusieurs tests de normalité pour des variables de valeur continue: les test de Kolmogorov-Smirnov, de Shapiro-Wilk et le test de Lilliefors.
+
+#### Disponibilité alimentaire journalière par habitant en Kcal
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(data$Dispo_alim_Kcal_pers_jour),sd=sd(data$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$Dispo_alim_Kcal_pers_jour)
+```
+
+Selon les deux premiers tests, l'hypothèse de normalité ne peut pas être rejetée au niveau de test de 5%. Le test de Lilliefors, plus sensible aux variations de la partie centrale de la distribution, présente un résultat plus critique envers l'hypothèse de normalité.
+
+```{r}
+hist(data$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire en Kcal")
+curve(dnorm(x,mean=mean(data$Dispo_alim_Kcal_pers_jour),sd=sd(data$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### Disponibilité alimentaire journalière par habitant en protéines
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$Dispo_prot_g_pers_jour,"pnorm", mean=mean(data$Dispo_prot_g_pers_jour),sd=sd(data$Dispo_prot_g_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$Dispo_prot_g_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$Dispo_prot_g_pers_jour)
+```
+
+Le test de Kolmogorov Smirnov semble favorable au test de normalité car sa p-valeur est supérieure à 5%. Selon les tests de Shapiro-Wilk et de Lilliefors en revanche, l'hypothèse de normalité peut être rejetée. Observons comment cela se traduit en confrontant les données sous la forme d'un histogramme avec une courbe de densité normale.
+
+```{r}
+hist(data$Dispo_prot_g_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire en protéines et densité normale")
+curve(dnorm(x,mean=mean(data$Dispo_prot_g_pers_jour),sd=sd(data$Dispo_prot_g_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### Part des protéines animales dans la consommation de protéines
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$part_prot_anim,"pnorm", mean=mean(data$Dispo_prot_g_pers_jour),sd=sd(data$part_prot_anim))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$part_prot_anim)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$part_prot_anim)
+```
+
+Ici, seul le test de Kolmogorov Smirnov valide l'hypothèse de normalité de la part des protéines animales dans la consommation. Avec une valeur bien inférieure au risque alpha de 5%, les deux autres tests invalident l'hypothèse.
+
+```{r}
+hist(data$part_prot_anim,prob=TRUE,xlab="",ylab="",main="Histogramme de la part des protéines animales et densité normale")
+curve(dnorm(x,mean=mean(data$part_prot_anim),sd=sd(data$part_prot_anim)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### Taux de croissance démographique entre 2013 et 2018
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$tx_crois_2013_18,"pnorm", mean=mean(data$tx_crois_2013_18),sd=sd(data$tx_crois_2013_18))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$tx_crois_2013_18)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$tx_crois_2013_18)
+```
+
+Les test de Lilliefors et de Shapiro-Wilk rejettent encore une fois l'hypothèse de normalité de la variable.
+
+```{r}
+hist(data$tx_crois_2013_18,prob=TRUE,xlab="",ylab="",main="Histogramme du taux de croissance démographique entre 2013 et 2018")
+curve(dnorm(x,mean=mean(data$tx_crois_2013_18),sd=sd(data$tx_crois_2013_18)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### Croissance du PIB par habitant (en dollars)
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$PIB_hab_dollar,"pnorm", mean=mean(data$PIB_hab_dollar),sd=sd(data$PIB_hab_dollar))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$PIB_hab_dollar)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$PIB_hab_dollar)
+```
+
+De manière assez prévisible, aucun test ne valide l'hypothèse de normalité car la variable un celle d'un pourcentage de croissance dans une économie mondialisée à la croissance faible.
+
+```{r}
+hist(data$PIB_hab_dollar,prob=TRUE,xlab="",ylab="",main="Histogramme de la croissance du PIB par habitant")
+curve(dnorm(x,mean=mean(data$PIB_hab_dollar),sd=sd(data$PIB_hab_dollar)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### L'indicateur de stabilité politique
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$indice_stab_pol,"pnorm", mean=mean(data$indice_stab_pol),sd=sd(data$indice_stab_pol))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$indice_stab_pol)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$indice_stab_pol)
+```
+
+Ici, les tests de Kolmogorov-Smirnov et de Lilliefors valident l'hypothèse de normalité. Le test de Shapiro-Wilk rejette quant à lui l'hypothèse selon laquelle la variable se conformerait à la loi de normalité.
+
+```{r}
+hist(data$indice_stab_pol,prob=TRUE,xlab="",ylab="",main="Histogramme de l'indice de stabilité politique")
+curve(dnorm(x,mean=mean(data$indice_stab_pol),sd=sd(data$indice_stab_pol)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### La distance à la France (en kilomètres)
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$Distance_France_km,"pnorm", mean=mean(data$Distance_France_km),sd=sd(data$Distance_France_km))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$Distance_France_km)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$Distance_France_km)
+```
+
+La variable de distance à la France ne voit que le test de Kolmogorov-Smirnov soutenir son hypothèse de normalité.
+
+```{r}
+hist(data$Distance_France_km,prob=TRUE,xlab="",ylab="",main="Histogramme de la distance à la France")
+curve(dnorm(x,mean=mean(data$Distance_France_km),sd=sd(data$Distance_France_km)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+#### La consommation de volaille par personne (en kg)
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(data$conso_volail_kg_pers,"pnorm", mean=mean(data$conso_volail_kg_pers),sd=sd(data$conso_volail_kg_pers))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(data$conso_volail_kg_pers)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(data$conso_volail_kg_pers)
+```
+
+Le test de Kolmogorov Smirnov valide de justesse l'hypothèse de normalité de la variable 'consommation de volaille'. Les autres tests rejettent néanmoins cette hypothèse
+
+```{r}
+hist(data$conso_volail_kg_pers,prob=TRUE,xlab="",ylab="",main="Histogramme de la consommation de volaille")
+curve(dnorm(x,mean=mean(data$conso_volail_kg_pers),sd=sd(data$conso_volail_kg_pers)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+Parmi toutes les variables, la disponibilité alimentaire (en Kcal) est la seule variable dont l'hypothèse de normalité n'est pas rejetée par le test de Shapiro -Wilk. Nous allons donc nous concentrer brièvement sur cette variable pour y tester la normalité de la distribution dans deux clusters sélectionnés.
+
+### Tests statistiques des clusters dans la variable 'disponibilité alimentaire(Kcal)'
+
+#### Test de normalité de chacun des 5 clusters
+
+Groupe 1
+
+```{r}
+# Restriction des données standardisées du 1er cluster
+dispo_alim_clust_1 <- data_clust %>% 
+    filter(data_clust$clust == 1) %>%
+    select(Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+hist(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire des pays du groupe 1")
+curve(dnorm(x,mean=mean(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_1$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+Groupe 2
+
+```{r}
+# Restriction des données standardisées du 2e cluster
+dispo_alim_clust_2 <- data_clust %>% 
+    filter(data_clust$clust == 2) %>%
+    select(Dispo_alim_Kcal_pers_jour)
+head(dispo_alim_clust_2)
+```
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+hist(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire des pays du groupe 2")
+curve(dnorm(x,mean=mean(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_2$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+Groupe 3
+
+```{r}
+# Restriction des données standardisées du 3e cluster
+dispo_alim_clust_3 <- data_clust %>% 
+    filter(data_clust$clust == 3) %>%
+    select(Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+hist(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire des pays du groupe 3")
+curve(dnorm(x,mean=mean(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_3$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+Groupe 4
+
+```{r}
+# Restriction des données standardisées du 4e cluster
+dispo_alim_clust_4 <- data_clust %>% 
+    filter(data_clust$clust == 4) %>%
+    select(Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+hist(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire des pays du groupe 4")
+curve(dnorm(x,mean=mean(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_4$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+Groupe 5
+
+```{r}
+# Restriction des données standardisées du 5e cluster
+dispo_alim_clust_5 <- data_clust %>% 
+    filter(data_clust$clust == 5) %>%
+    select(Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Kolmogorov Smirnov
+ks.test(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour,"pnorm", mean=mean(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour))
+```
+
+```{r}
+# Test de Shapiro-Wilk 
+shapiro.test(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Test de Lilliefors
+lillie.test(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+hist(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour,prob=TRUE,xlab="",ylab="",main="Histogramme de la disponibilité alimentaire des pays du groupe 5")
+curve(dnorm(x,mean=mean(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour),sd=sd(dispo_alim_clust_5$Dispo_alim_Kcal_pers_jour)),col="red",lwd=2,add=TRUE,yaxt="n")
+```
+
+De ces différents tests d'adéquation, nous pouvons conclure que les pays des groupes 2 et 3 semblent mieux remplir les conditions de normalité dans la variable "disponibilité alimentaire (Kcal)". Ce sont ces deux groupes que nous allons plus précisément comparer dans la partie suivante.
+
+#### Tests de comparaison
+
+Préparation des dataframes
+
+```{r}
+# Restriction et préparation du tableau pour la jointure
+data_clust_2et3 <- data_clust %>% filter(clust==2 | clust==3) %>%
+    select(clust)
+head(data_clust_2et3)
+```
+
+```{r}
+# Jointure avec le dataframe principal
+data_clust_2et3 <- merge(data_clust_2et3, data, by.x = 0, by.y = 0, all.x = TRUE, all.y = TRUE)
+```
+
+```{r}
+# Restriction aux pays des clusters 5
+data_clust_2et3 <- data_clust_2et3[complete.cases(data_clust_2et3),]
+head(data_clust_2et3)
+```
+
+```{r}
+# Séparation du dataframe selon l'appartenance des pays aux clusters 2 et 3
+data_clust_2 <- data_clust_2et3 %>%
+    filter(clust==2)
+
+data_clust_3 <- data_clust_2et3 %>%
+    filter(clust==3)
+```
+
+```{r}
+# Suppresion de la colonne "clust"
+data_clust_2et3$clust <- NULL
+```
+
+```{r}
+# Restriction
+df_clust2 <- data_clust_2 %>% 
+    select(Row.names, Dispo_alim_Kcal_pers_jour)
+
+df_clust3 <- data_clust_3 %>% 
+    select(Row.names, Dispo_alim_Kcal_pers_jour)
+```
+
+```{r}
+# Mise en index de la colonne 'Row.names'
+rownames(df_clust2) <- df_clust2$Row.names
+df_clust2$Row.names <- NULL
+
+
+rownames(df_clust3) <- df_clust3$Row.names
+df_clust3$Row.names <- NULL
+
+```
+
+Test d'égalité des variances des pays des groupes 2 et 3 dans la variable 'disponibilité alimentaire (Kcal)':
+
+```{r}
+var.test(df_clust2$Dispo_alim_Kcal_pers_jour, df_clust3$Dispo_alim_Kcal_pers_jour)
+```
+
+La p-valeur s'élève à environ 0.72. Nous ne pouvons donc rejeter l'égalité des variances au niveau de test de 5%.
+
+Test d'égalité des moyennes des pays des groupes 2 et 3 dans la variable 'disponibilité alimentaire (Kcal)':
+
+```{r}
+t.test(df_clust2$Dispo_alim_Kcal_pers_jour, df_clust3$Dispo_alim_Kcal_pers_jour, var.equal=TRUE)
+```
+
+```{r}
+t.test(df_clust2$Dispo_alim_Kcal_pers_jour, df_clust3$Dispo_alim_Kcal_pers_jour, var.equal=TRUE)
+```
+
+On obtient ici une p-valeur égale à environ 1.46 x 10e5. L'hypothèse d'égalité des moyennes dans la variable 'disponibilité alimentaire (Kcal)' est donc largement rejetée à un niveau de test de 5%.
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
